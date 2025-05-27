@@ -31,7 +31,7 @@ connectDB();
 
 // Middleware
 app.use(cors({
-  origin: 'http://localhost:3000',
+  origin: 'https://e-health-xi.vercel.app/',
   credentials: true
 }));
 app.use(helmet());
@@ -56,7 +56,7 @@ const { Server } = require('socket.io');
 const Appointment = require('./models/Appointment');
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:3000", // <-- FIXED: match your frontend port
+    origin: "https://e-health-xi.vercel.app/", // <-- FIXED: match your frontend port
     methods: ["GET", "POST"]
   }
 });

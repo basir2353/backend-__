@@ -13,7 +13,7 @@ app.use(cors());
 app.use(bodyParser.json());
 require('dotenv').config();
 app.use(cors({
-  origin: 'http://localhost:3000',
+  origin: 'https://e-health-xi.vercel.app/',
   credentials: true
 }));
 // Connect to the database
