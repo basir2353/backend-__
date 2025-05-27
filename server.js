@@ -16,7 +16,10 @@ const Call = require('./models/Call'); // <-- Add this line to import the Call m
 const http = require('http');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://e-health-xi.vercel.app'
+];
 // Load environment variables
 dotenv.config();
 
@@ -29,11 +32,22 @@ const server = http.createServer(app);
 // Connect to database
 connectDB();
 
-// Middleware
 app.use(cors({
-  origin: 'https://e-health-xi.vercel.app/',
-  credentials: true
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true // Allow cookies and authorization headers
 }));
+
+// Your routes go here
+// Example:
+app.get('/', (req, res) => {
+  res.send('CORS Configured!');
+});
 app.use(helmet());
 app.use(express.json());
 app.use(morgan('dev'));
