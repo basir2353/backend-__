@@ -21,7 +21,7 @@ const auth = require('./middlewares/auth');
 
 // Routes
 const authRoutes = require('./routes/authRoutes');
-const reportRoutes = require('./routes/report');
+const reportRoutes = require('./routes/report');       // <-- unchanged
 const challengeRoutes = require('./routes/challenges');
 const doctorRoutes = require('./routes/doctor');
 const socketHandler = require('./sockets/callHandlers');
@@ -39,7 +39,6 @@ app.use(cors({
   credentials: true
 }));
 
-
 // Middlewares
 app.use(helmet());
 app.use(express.json());
@@ -54,7 +53,7 @@ app.get('/', (req, res) => res.send('CORS Configured!'));
 app.use('/api/auth', authRoutes);
 app.use('/api', challengeRoutes);
 app.use('/api', doctorRoutes);
-app.use('/api', reportRoutes);
+app.use('/api', reportRoutes);     // <-- this mounts reportRoutes at /api
 
 // Protected test route
 app.use('/api/protected', auth, (req, res) => {
@@ -171,4 +170,8 @@ server.listen(PORT, () => {
 
 process.on('unhandledRejection', err => {
   console.error('UNHANDLED REJECTION:', err);
+});
+process.on('uncaughtException', err => {
+  console.error('UNCAUGHT EXCEPTION:', err);
+  process.exit(1); // Exit the process to avoid running in an unstable state
 });

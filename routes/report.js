@@ -31,7 +31,7 @@ router.get('/reports', auth, async (req, res) => {
 });
 
 // Admin/Doctor: Get all reports (paginated)
-router.get('/api/reports/all', auth, async (req, res) => {
+router.get('/reports/all', auth, async (req, res) => {
   try {
     if (!['admin', 'doctor'].includes(req.user.role)) {
       return res.status(403).json({ message: 'Access denied. Admin or Dr role required.' });
@@ -62,7 +62,7 @@ router.get('/api/reports/all', auth, async (req, res) => {
 });
 
 // Admin/Doctor: Update report status
-router.patch('/api/reports/:id/status', auth, async (req, res) => {
+router.patch('/reports/:id/status', auth, async (req, res) => {
   try {
     if (!['admin', 'doctor'].includes(req.user.role)) {
       return res.status(403).json({ message: 'Access denied. Admin or Dr role required.' });
@@ -90,7 +90,7 @@ router.patch('/api/reports/:id/status', auth, async (req, res) => {
 });
 
 // Admin/Doctor: Delete a report
-router.delete('/api/reports/:id', auth, async (req, res) => {
+router.delete('/reports/:id', auth, async (req, res) => {
   try {
     if (!['admin', 'doctor'].includes(req.user.role)) {
       return res.status(403).json({ message: 'Access denied. Admin or Dr role required.' });
