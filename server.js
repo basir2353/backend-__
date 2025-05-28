@@ -14,7 +14,7 @@ const bcrypt = require('bcryptjs');
 const User = require('./models/User');
 const Appointment = require('./models/Appointment');
 const Call = require('./models/Call');
-const Poll = require('./models/Poll'); // ✅ Add Poll model if available
+const Poll = require('./models/PollM'); // ✅ Add Poll model if available
 
 // Middleware
 const auth = require('./middlewares/auth');
