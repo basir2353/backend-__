@@ -1,0 +1,15 @@
+FROM node:16.15.0-alpine
+
+WORKDIR /app
+
+# Copy both files for better caching (if package-lock.json exists)
+COPY package.json package-lock.json* ./
+
+RUN npm install
+
+COPY . .
+
+EXPOSE 5000
+
+# Use nodemon via npx for local dev
+CMD ["npx", "nodemon", "src/server.js"]
