@@ -1,586 +1,289 @@
-const { Server } = require('socket.io');
-const express = require('express');
-const Appointment = require('../models/Appointment');
-const http = require('http');
-const app = express()
-const server = http.createServer(app);
+const User = require('../models/User');
+const Call = require('../models/Call');
 
-const io = new Server(server, {
-  cors: {
-    origin: "https://e-health-xi.vercel.app/", // <-- FIXED: match your frontend port
-    methods: ["GET", "POST"]
-  }
-});
+const activeUsers = new Map(); // socket.id => userData
+const activeCalls = new Map(); // callId => callInfo
 
-// In-memory storage
-const activeUsers = new Map(); // socketId -> user info
-const activeCalls = new Map(); // callId -> call info
+function socketHandler(io) {
+  io.on('connection', (socket) => {
+    console.log('✅ New client connected:', socket.id);
 
-function socketHandler (){
-    // --- Socket.IO logic (single block) ---
-io.on('connection', (socket) => {
-  console.log('✅ New client connected:', socket.id);
-
-  // User joins with their info
-  socket.on('user-joined', async (userData) => {
-    try {
-      activeUsers.set(socket.id, userData);
-
-      // Update user online status
-      await User.findByIdAndUpdate(userData.id, { 
-        isOnline: true, 
-        socketId: socket.id 
-      });
-
-      // Fetch updated user info and emit to frontend (for doctor dashboard update)
-      if (userData.role === 'doctor') {
-        const updatedDoctor = await User.findById(userData.id).select('name email role isOnline');
-        io.to(socket.id).emit('doctor-info', updatedDoctor);
-      }
-
-      // Notify admins of user status
-      broadcastToAdmins('user-status-update', {
-        userId: userData.id,
-        username: userData.username || userData.name || userData.email,
-        role: userData.role,
-        isOnline: true
-      });
-
-      // Emit active users to all clients
-      io.emit('active-users', Array.from(activeUsers.values()));
-
-      console.log(`${userData.username || userData.name || userData.email} (${userData.role}) joined`);
-    } catch (error) {
-      console.error('Error in user-joined:', error);
-    }
-  });
-
-  // Initiate call
-  socket.on('initiate-call', async (data) => {
-    try {
-      const { callerId, calleeId, callerName } = data;
-
-      // Find callee's socket
-      const callee = await User.findById(calleeId);
-      if (!callee || !callee.socketId) {
-        socket.emit('call-error', { message: 'User is offline' });
-        return;
-      }
-
-      // Find caller's info for name fallback
-      let callerUser = null;
+    // -------------------- User Join --------------------
+    socket.on('user-joined', async (userData) => {
       try {
-        callerUser = await User.findById(callerId);
-      } catch {}
+        console.log('👤 User joining:', userData);
+        activeUsers.set(socket.id, userData);
 
-      // Create call record
-      const call = new Call({
-        caller: callerId,
-        callee: calleeId,
-        status: 'initiated'
-      });
-      await call.save();
-
-      const callId = call._id.toString();
-
-      // Store active call
-      activeCalls.set(callId, {
-        callId,
-        caller: { 
-          id: callerId, 
-          name: callerName || (callerUser && (callerUser.username || callerUser.name || callerUser.email)) || 'Unknown', 
-          socketId: socket.id 
-        },
-        callee: { 
-          id: calleeId, 
-          name: callee.username || callee.name || callee.email || 'Unknown', 
-          socketId: callee.socketId 
-        },
-        status: 'initiated',
-        startTime: new Date()
-      });
-
-      // Notify callee
-      io.to(callee.socketId).emit('incoming-call', {
-        callId,
-        callerId,
-        callerName: callerName || (callerUser && (callerUser.username || callerUser.name || callerUser.email)) || 'Unknown',
-        callerSocketId: socket.id
-      });
-
-      // Notify admins
-      broadcastToAdmins('new-call', activeCalls.get(callId));
-
-      console.log(`Call initiated: ${callerName || (callerUser && (callerUser.username || callerUser.name || callerUser.email)) || 'Unknown'} -> ${callee.username || callee.name || callee.email || 'Unknown'}`);
-    } catch (error) {
-      console.error('Error in initiate-call:', error);
-      socket.emit('call-error', { message: 'Failed to initiate call' });
-    }
-  });
-
-  // Accept call
-  socket.on('accept-call', async (data) => {
-    try {
-      const { callId } = data;
-      const callInfo = activeCalls.get(callId);
-
-      if (!callInfo) {
-        socket.emit('call-error', { message: 'Call not found' });
-        return;
-      }
-
-      // Update call status
-      callInfo.status = 'accepted';
-      activeCalls.set(callId, callInfo);
-
-      // Update database
-      await Call.findByIdAndUpdate(callId, { status: 'accepted' });
-
-      // Notify caller that call was accepted
-      io.to(callInfo.caller.socketId).emit('call-accepted', { callId });
-
-      // Notify admins
-      broadcastToAdmins('call-status-update', callInfo);
-
-      console.log(`Call accepted: ${callInfo.caller.name} <-> ${callInfo.callee.name}`);
-    } catch (error) {
-      console.error('Error in accept-call:', error);
-    }
-  });
-
-  // Reject call
-  socket.on('reject-call', async (data) => {
-    try {
-      const { callId } = data;
-      const callInfo = activeCalls.get(callId);
-
-      if (!callInfo) return;
-
-      // Update database
-      await Call.findByIdAndUpdate(callId, { 
-        status: 'rejected',
-        endTime: new Date()
-      });
-
-      // Notify caller
-      io.to(callInfo.caller.socketId).emit('call-rejected', { callId });
-
-      // Remove from active calls
-      activeCalls.delete(callId);
-
-      // Notify admins
-      broadcastToAdmins('call-ended', { callId, reason: 'rejected' });
-
-      console.log(`Call rejected: ${callInfo.caller.name} -> ${callInfo.callee.name}`);
-    } catch (error) {
-      console.error('Error in reject-call:', error);
-    }
-  });
-
-  // End call
-  socket.on('end-call', async (data) => {
-    try {
-      const { callId } = data;
-      const callInfo = activeCalls.get(callId);
-
-      if (!callInfo) return;
-
-      const endTime = new Date();
-      const duration = Math.floor((endTime - callInfo.startTime) / 1000);
-
-      // Update database
-      await Call.findByIdAndUpdate(callId, { 
-        status: 'ended',
-        endTime,
-        duration
-      });
-
-      // Notify both parties
-      io.to(callInfo.caller.socketId).emit('call-ended', { callId });
-      io.to(callInfo.callee.socketId).emit('call-ended', { callId });
-
-      // Remove from active calls
-      activeCalls.delete(callId);
-
-      // Notify admins
-      broadcastToAdmins('call-ended', { callId, duration });
-
-      console.log(`Call ended: ${callInfo.caller.name} <-> ${callInfo.callee.name} (${duration}s)`);
-    } catch (error) {
-      console.error('Error in end-call:', error);
-    }
-  });
-
-  // WebRTC signaling
-  socket.on('offer', (data) => {
-    socket.to(data.target).emit('offer', {
-      offer: data.offer,
-      caller: socket.id
-    });
-  });
-
-  socket.on('answer', (data) => {
-    socket.to(data.target).emit('answer', {
-      answer: data.answer,
-      callee: socket.id
-    });
-  });
-
-  socket.on('ice-candidate', (data) => {
-    socket.to(data.target).emit('ice-candidate', {
-      candidate: data.candidate,
-      sender: socket.id
-    });
-  });
-
-  // Admin requests active calls
-  socket.on('get-active-calls', () => {
-    const userData = activeUsers.get(socket.id);
-    if (userData && userData.role === 'admin') {
-      socket.emit('active-calls', Array.from(activeCalls.values()));
-    }
-  });
-
-  // Handle disconnect
-  socket.on('disconnect', async () => {
-    try {
-      const userData = activeUsers.get(socket.id);
-      if (userData) {
-        // Update user offline status
-        await User.findByIdAndUpdate(userData.id, { 
-          isOnline: false, 
-          socketId: null 
+        await User.findByIdAndUpdate(userData.id, {
+          isOnline: true,
+          socketId: socket.id
         });
 
-        // End any active calls involving this user
-        for (const [callId, callInfo] of activeCalls.entries()) {
-          if (callInfo.caller.socketId === socket.id || callInfo.callee.socketId === socket.id) {
-            const endTime = new Date();
-            const duration = Math.floor((endTime - callInfo.startTime) / 1000);
+        // Send user their own info
+        socket.emit('your-info', {
+          id: userData.id,
+          name: userData.name || userData.username || userData.email,
+          role: userData.role
+        });
 
-            await Call.findByIdAndUpdate(callId, { 
-              status: 'ended',
-              endTime,
-              duration
-            });
-
-            // Notify the other party
-            const otherSocketId = callInfo.caller.socketId === socket.id 
-              ? callInfo.callee.socketId 
-              : callInfo.caller.socketId;
-
-            io.to(otherSocketId).emit('call-ended', { callId, reason: 'disconnect' });
-
-            activeCalls.delete(callId);
-            broadcastToAdmins('call-ended', { callId, reason: 'disconnect' });
-          }
+        // Send available users based on role
+        if (userData.role === 'doctor') {
+          // Send all online employees to this doctor
+          const onlineEmployees = getOnlineUsersByRole('employee');
+          socket.emit('available-users', onlineEmployees);
+          
+          // Notify all online employees about this doctor
+          broadcastToRole(io, activeUsers, 'employee', 'available-users', [getUserInfo(userData)]);
+        } else if (userData.role === 'employee') {
+          // Send all online doctors to this employee
+          const onlineDoctors = getOnlineUsersByRole('doctor');
+          socket.emit('available-users', onlineDoctors);
+          
+          // Notify all online doctors about this employee
+          broadcastToRole(io, activeUsers, 'doctor', 'available-users', [getUserInfo(userData)]);
         }
 
-        // Notify admins of user status
-        broadcastToAdmins('user-status-update', {
+        // Broadcast to admins
+        broadcastToAdmins(io, activeUsers, 'user-status-update', {
           userId: userData.id,
           username: userData.username || userData.name || userData.email,
           role: userData.role,
-          isOnline: false
+          isOnline: true
         });
 
-        activeUsers.delete(socket.id);
-        console.log(`${userData.username || userData.name || userData.email} disconnected`);
+        console.log(`✅ ${userData.role} ${userData.name || userData.email} joined`);
+      } catch (error) {
+        console.error('❌ Error in user-joined:', error);
       }
-    } catch (error) {
-      console.error('Error in disconnect:', error);
-    }
-  });
-});
+    });
 
-// Helper function to broadcast to all admins
-function broadcastToAdmins(event, data) {
+    // -------------------- Get Available Users --------------------
+    socket.on('get-available-users', () => {
+      const user = activeUsers.get(socket.id);
+      if (!user) return;
+
+      if (user.role === 'doctor') {
+        const onlineEmployees = getOnlineUsersByRole('employee');
+        socket.emit('available-users', onlineEmployees);
+      } else if (user.role === 'employee') {
+        const onlineDoctors = getOnlineUsersByRole('doctor');
+        socket.emit('available-users', onlineDoctors);
+      }
+    });
+
+    // -------------------- Call Initiation --------------------
+    socket.on('initiate-call', async ({ callerId, calleeId, callerName }) => {
+      try {
+        const callee = await User.findById(calleeId);
+        if (!callee?.socketId) {
+          return socket.emit('call-error', { message: 'User is offline' });
+        }
+
+        const call = new Call({ caller: callerId, callee: calleeId, status: 'initiated' });
+        await call.save();
+
+        const callId = call._id.toString();
+        const callInfo = {
+          callId,
+          caller: { id: callerId, name: callerName, socketId: socket.id },
+          callee: { id: calleeId, name: callee.name || callee.email, socketId: callee.socketId },
+          status: 'initiated',
+          startTime: new Date()
+        };
+
+        activeCalls.set(callId, callInfo);
+
+        io.to(callee.socketId).emit('incoming-call', {
+          callId,
+          callerId,
+          callerName,
+          callerSocketId: socket.id
+        });
+
+        broadcastToAdmins(io, activeUsers, 'new-call', callInfo);
+      } catch (err) {
+        console.error('❌ initiate-call error:', err);
+        socket.emit('call-error', { message: 'Failed to initiate call' });
+      }
+    });
+
+    // -------------------- Accept Call --------------------
+    socket.on('accept-call', async ({ callId }) => {
+      try {
+        const call = activeCalls.get(callId);
+        if (!call) return socket.emit('call-error', { message: 'Call not found' });
+
+        call.status = 'accepted';
+        await Call.findByIdAndUpdate(callId, { status: 'accepted' });
+
+        io.to(call.caller.socketId).emit('call-accepted', { callId });
+        io.to(call.callee.socketId).emit('call-accepted', { callId });
+
+        broadcastToAdmins(io, activeUsers, 'call-status-update', call);
+      } catch (err) {
+        console.error('❌ accept-call error:', err);
+      }
+    });
+
+    // -------------------- Reject Call --------------------
+    socket.on('reject-call', async ({ callId }) => {
+      try {
+        const call = activeCalls.get(callId);
+        if (!call) return;
+
+        await Call.findByIdAndUpdate(callId, {
+          status: 'rejected',
+          endTime: new Date()
+        });
+
+        io.to(call.caller.socketId).emit('call-rejected', { callId });
+        activeCalls.delete(callId);
+
+        broadcastToAdmins(io, activeUsers, 'call-ended', { callId, reason: 'rejected' });
+      } catch (err) {
+        console.error('❌ reject-call error:', err);
+      }
+    });
+
+    // -------------------- End Call --------------------
+    socket.on('end-call', async ({ callId }) => {
+      try {
+        const call = activeCalls.get(callId);
+        if (!call) return;
+
+        const endTime = new Date();
+        const duration = Math.floor((endTime - call.startTime) / 1000);
+
+        await Call.findByIdAndUpdate(callId, { status: 'ended', endTime, duration });
+
+        io.to(call.caller.socketId).emit('call-ended', { callId });
+        io.to(call.callee.socketId).emit('call-ended', { callId });
+
+        activeCalls.delete(callId);
+        broadcastToAdmins(io, activeUsers, 'call-ended', { callId, duration });
+      } catch (err) {
+        console.error('❌ end-call error:', err);
+      }
+    });
+
+    // -------------------- WebRTC Signaling --------------------
+    socket.on('offer', ({ offer, target }) => {
+      io.to(target).emit('offer', { offer, from: socket.id });
+    });
+
+    socket.on('answer', ({ answer, target }) => {
+      io.to(target).emit('answer', { answer, from: socket.id });
+    });
+
+    socket.on('ice-candidate', ({ candidate, target }) => {
+      io.to(target).emit('ice-candidate', { candidate, from: socket.id });
+    });
+
+    // -------------------- Admin: Get Active Calls --------------------
+    socket.on('get-active-calls', () => {
+      const user = activeUsers.get(socket.id);
+      if (user?.role === 'admin') {
+        socket.emit('active-calls', Array.from(activeCalls.values()));
+      }
+    });
+
+    // -------------------- Disconnect --------------------
+    socket.on('disconnect', async () => {
+      const user = activeUsers.get(socket.id);
+      if (!user) return;
+
+      await User.findByIdAndUpdate(user.id, {
+        isOnline: false,
+        socketId: null
+      });
+
+      // Handle active calls
+      for (const [callId, call] of activeCalls.entries()) {
+        if (call.caller.socketId === socket.id || call.callee.socketId === socket.id) {
+          const otherSocketId = call.caller.socketId === socket.id
+            ? call.callee.socketId
+            : call.caller.socketId;
+
+          io.to(otherSocketId).emit('call-ended', { callId, reason: 'disconnect' });
+          await Call.findByIdAndUpdate(callId, {
+            status: 'ended',
+            endTime: new Date()
+          });
+          activeCalls.delete(callId);
+        }
+      }
+
+      // Notify other users about disconnection
+      if (user.role === 'doctor') {
+        // Notify all employees that this doctor went offline
+        broadcastToRole(io, activeUsers, 'employee', 'user-disconnected', {
+          id: user.id,
+          name: user.name || user.username || user.email,
+          role: user.role
+        });
+      } else if (user.role === 'employee') {
+        // Notify all doctors that this employee went offline
+        broadcastToRole(io, activeUsers, 'doctor', 'user-disconnected', {
+          id: user.id,
+          name: user.name || user.username || user.email,
+          role: user.role
+        });
+      }
+
+      broadcastToAdmins(io, activeUsers, 'user-status-update', {
+        userId: user.id,
+        username: user.username || user.name || user.email,
+        role: user.role,
+        isOnline: false
+      });
+
+      activeUsers.delete(socket.id);
+      console.log(`👋 ${user.username || user.name || user.email} disconnected`);
+    });
+  });
+
+  // Status log every 30s
+  setInterval(() => {
+    console.log(`📊 Active Users: ${activeUsers.size}, Active Calls: ${activeCalls.size}`);
+    console.log('Users by role:', {
+      doctors: getOnlineUsersByRole('doctor').length,
+      employees: getOnlineUsersByRole('employee').length,
+      admins: getOnlineUsersByRole('admin').length
+    });
+  }, 30000);
+}
+
+// Helper functions
+function getOnlineUsersByRole(role) {
+  const users = [];
   for (const [socketId, userData] of activeUsers.entries()) {
-    if (userData.role === 'admin') {
+    if (userData.role === role) {
+      users.push(getUserInfo(userData));
+    }
+  }
+  return users;
+}
+
+function getUserInfo(userData) {
+  return {
+    id: userData.id,
+    name: userData.name || userData.username || userData.email,
+    role: userData.role,
+    socketId: userData.socketId
+  };
+}
+
+function broadcastToRole(io, activeUsers, targetRole, event, data) {
+  for (const [socketId, user] of activeUsers.entries()) {
+    if (user.role === targetRole) {
       io.to(socketId).emit(event, data);
     }
   }
 }
-}
-io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
 
-  // User joins with their info
-  socket.on('user-joined', async (userData) => {
-    try {
-      activeUsers.set(socket.id, userData);
-      
-      // Update user online status
-      await User.findByIdAndUpdate(userData.id, { 
-        isOnline: true, 
-        socketId: socket.id 
-      });
-
-      // Fetch updated user info and emit to frontend (for doctor dashboard update)
-      if (userData.role === 'doctor') {
-        const updatedDoctor = await User.findById(userData.id).select('name email role isOnline');
-        io.to(socket.id).emit('doctor-info', updatedDoctor);
-      }
-
-      // Notify admins of user status
-      broadcastToAdmins('user-status-update', {
-        userId: userData.id,
-        username: userData.username || userData.name || userData.email,
-        role: userData.role,
-        isOnline: true
-      });
-
-      // Emit active users to all clients
-      io.emit('active-users', Array.from(activeUsers.values()));
-
-      console.log(`${userData.username || userData.name || userData.email} (${userData.role}) joined`);
-    } catch (error) {
-      console.error('Error in user-joined:', error);
-    }
-  });
-
-  // Initiate call
-  socket.on('initiate-call', async (data) => {
-    try {
-      const { callerId, calleeId, callerName } = data;
-
-      // Find callee's socket
-      const callee = await User.findById(calleeId);
-      if (!callee || !callee.socketId) {
-        socket.emit('call-error', { message: 'User is offline' });
-        return;
-      }
-
-      // Find caller's info for name fallback
-      let callerUser = null;
-      try {
-        callerUser = await User.findById(callerId);
-      } catch {}
-
-      // Create call record
-      const call = new Call({
-        caller: callerId,
-        callee: calleeId,
-        status: 'initiated'
-      });
-      await call.save();
-
-      const callId = call._id.toString();
-
-      // Store active call
-      activeCalls.set(callId, {
-        callId,
-        caller: { 
-          id: callerId, 
-          name: callerName || (callerUser && (callerUser.username || callerUser.name || callerUser.email)) || 'Unknown', 
-          socketId: socket.id 
-        },
-        callee: { 
-          id: calleeId, 
-          name: callee.username || callee.name || callee.email || 'Unknown', 
-          socketId: callee.socketId 
-        },
-        status: 'initiated',
-        startTime: new Date()
-      });
-
-      // Notify callee
-      io.to(callee.socketId).emit('incoming-call', {
-        callId,
-        callerId,
-        callerName: callerName || (callerUser && (callerUser.username || callerUser.name || callerUser.email)) || 'Unknown',
-        callerSocketId: socket.id
-      });
-
-      // Notify admins
-      broadcastToAdmins('new-call', activeCalls.get(callId));
-
-      console.log(`Call initiated: ${callerName || (callerUser && (callerUser.username || callerUser.name || callerUser.email)) || 'Unknown'} -> ${callee.username || callee.name || callee.email || 'Unknown'}`);
-    } catch (error) {
-      console.error('Error in initiate-call:', error);
-      socket.emit('call-error', { message: 'Failed to initiate call' });
-    }
-  });
-
-  // Accept call
-  socket.on('accept-call', async (data) => {
-    try {
-      const { callId } = data;
-      const callInfo = activeCalls.get(callId);
-      
-      if (!callInfo) {
-        socket.emit('call-error', { message: 'Call not found' });
-        return;
-      }
-
-      // Update call status
-      callInfo.status = 'accepted';
-      activeCalls.set(callId, callInfo);
-
-      // Update database
-      await Call.findByIdAndUpdate(callId, { status: 'accepted' });
-
-      // Notify caller that call was accepted
-      io.to(callInfo.caller.socketId).emit('call-accepted', { callId });
-
-      // Notify admins
-      broadcastToAdmins('call-status-update', callInfo);
-
-      console.log(`Call accepted: ${callInfo.caller.name} <-> ${callInfo.callee.name}`);
-    } catch (error) {
-      console.error('Error in accept-call:', error);
-    }
-  });
-
-  // Reject call
-  socket.on('reject-call', async (data) => {
-    try {
-      const { callId } = data;
-      const callInfo = activeCalls.get(callId);
-      
-      if (!callInfo) return;
-
-      // Update database
-      await Call.findByIdAndUpdate(callId, { 
-        status: 'rejected',
-        endTime: new Date()
-      });
-
-      // Notify caller
-      io.to(callInfo.caller.socketId).emit('call-rejected', { callId });
-
-      // Remove from active calls
-      activeCalls.delete(callId);
-
-      // Notify admins
-      broadcastToAdmins('call-ended', { callId, reason: 'rejected' });
-
-      console.log(`Call rejected: ${callInfo.caller.name} -> ${callInfo.callee.name}`);
-    } catch (error) {
-      console.error('Error in reject-call:', error);
-    }
-  });
-
-  // End call
-  socket.on('end-call', async (data) => {
-    try {
-      const { callId } = data;
-      const callInfo = activeCalls.get(callId);
-      
-      if (!callInfo) return;
-
-      const endTime = new Date();
-      const duration = Math.floor((endTime - callInfo.startTime) / 1000);
-
-      // Update database
-      await Call.findByIdAndUpdate(callId, { 
-        status: 'ended',
-        endTime,
-        duration
-      });
-
-      // Notify both parties
-      io.to(callInfo.caller.socketId).emit('call-ended', { callId });
-      io.to(callInfo.callee.socketId).emit('call-ended', { callId });
-
-      // Remove from active calls
-      activeCalls.delete(callId);
-
-      // Notify admins
-      broadcastToAdmins('call-ended', { callId, duration });
-
-      console.log(`Call ended: ${callInfo.caller.name} <-> ${callInfo.callee.name} (${duration}s)`);
-    } catch (error) {
-      console.error('Error in end-call:', error);
-    }
-  });
-
-  // WebRTC signaling
-  socket.on('offer', (data) => {
-    socket.to(data.target).emit('offer', {
-      offer: data.offer,
-      caller: socket.id
-    });
-  });
-
-  socket.on('answer', (data) => {
-    socket.to(data.target).emit('answer', {
-      answer: data.answer,
-      callee: socket.id
-    });
-  });
-
-  socket.on('ice-candidate', (data) => {
-    socket.to(data.target).emit('ice-candidate', {
-      candidate: data.candidate,
-      sender: socket.id
-    });
-  });
-
-  // Admin requests active calls
-  socket.on('get-active-calls', () => {
-    const userData = activeUsers.get(socket.id);
-    if (userData && userData.role === 'admin') {
-      socket.emit('active-calls', Array.from(activeCalls.values()));
-    }
-  });
-
-  // Handle disconnect
-  socket.on('disconnect', async () => {
-    try {
-      const userData = activeUsers.get(socket.id);
-      if (userData) {
-        // Update user offline status
-        await User.findByIdAndUpdate(userData.id, { 
-          isOnline: false, 
-          socketId: null 
-        });
-
-        // End any active calls involving this user
-        for (const [callId, callInfo] of activeCalls.entries()) {
-          if (callInfo.caller.socketId === socket.id || callInfo.callee.socketId === socket.id) {
-            const endTime = new Date();
-            const duration = Math.floor((endTime - callInfo.startTime) / 1000);
-
-            await Call.findByIdAndUpdate(callId, { 
-              status: 'ended',
-              endTime,
-              duration
-            });
-
-            // Notify the other party
-            const otherSocketId = callInfo.caller.socketId === socket.id 
-              ? callInfo.callee.socketId 
-              : callInfo.caller.socketId;
-            
-            io.to(otherSocketId).emit('call-ended', { callId, reason: 'disconnect' });
-            
-            activeCalls.delete(callId);
-            broadcastToAdmins('call-ended', { callId, reason: 'disconnect' });
-          }
-        }
-
-        // Notify admins of user status
-        broadcastToAdmins('user-status-update', {
-          userId: userData.id,
-          username: userData.username || userData.name || userData.email,
-          role: userData.role,
-          isOnline: false
-        });
-
-        activeUsers.delete(socket.id);
-        console.log(`${userData.username || userData.name || userData.email} disconnected`);
-      }
-    } catch (error) {
-      console.error('Error in disconnect:', error);
-    }
-  });
-});
-
-// Helper function to broadcast to all admins
-function broadcastToAdmins(event, data) {
-  for (const [socketId, userData] of activeUsers.entries()) {
-    if (userData.role === 'admin') {
+function broadcastToAdmins(io, activeUsers, event, data) {
+  for (const [socketId, user] of activeUsers.entries()) {
+    if (user.role === 'admin') {
       io.to(socketId).emit(event, data);
     }
   }

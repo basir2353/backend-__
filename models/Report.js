@@ -1,17 +1,15 @@
 const mongoose = require('mongoose');
-const user = require('./User'); // Assuming User model is in the same directory
-const reportSchema = new mongoose.Schema({
-user: {
-  type: mongoose.Schema.Types.ObjectId,
-  ref: 'User', // ✅ Corrected: 'User', not 'Users'
-  required: true
-}
 
-,
+const reportSchema = new mongoose.Schema({
+  user: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
   type: {
     type: String,
     required: true,
-    enum: ['option1', 'option2', 'option3'] // adjust based on your real options
+    enum: ['hazard', 'safety', 'incident'] // Added 'incident'
   },
   date: {
     type: String,
@@ -46,7 +44,7 @@ user: {
     enum: ['pending', 'in-progress', 'resolved']
   }
 }, {
-  timestamps: true // adds createdAt and updatedAt
+  timestamps: true
 });
 
 module.exports = mongoose.model('Report', reportSchema);

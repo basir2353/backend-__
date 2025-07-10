@@ -1,8 +1,8 @@
+// Create Challenge
 const express = require('express');
 const router = express.Router();
 const Challenge = require('../models/challenges');
 
-// Create Challenge
 router.post('/createChallenge', async (req, res) => {
   try {
     const { title, description, rewardPoints } = req.body;
@@ -37,8 +37,8 @@ router.get('/challenges', async (req, res) => {
 router.post('/participate/:challengeId', async (req, res) => {
   try {
     const { challengeId } = req.params;
-    const { participantId } = req.body;
-
+    const { participantId } = req.body; // This could be user ID, email, or session ID
+    
     if (!participantId) {
       return res.status(400).json({ message: 'Participant ID is required' });
     }
@@ -48,23 +48,24 @@ router.post('/participate/:challengeId', async (req, res) => {
       return res.status(404).json({ message: 'Challenge not found' });
     }
 
-    // Ensure no duplicate participation
+    // Check if participant has already participated
     if (challenge.participants.includes(participantId)) {
       return res.status(400).json({ message: 'You have already participated in this challenge' });
     }
 
+    // Add participant and increment count
     challenge.participants.push(participantId);
-    challenge.participantsCount = challenge.participants.length;
+    challenge.participantsCount += 1;
+    
     await challenge.save();
-
-    res.status(200).json({
-      message: 'Successfully participated in challenge',
+    
+    res.status(200).json({ 
+      message: 'Successfully participated in challenge', 
       challenge,
-      participantsCount: challenge.participantsCount
+      participantsCount: challenge.participantsCount 
     });
   } catch (error) {
     res.status(500).json({ message: 'Failed to participate in challenge', error: error.message });
   }
 });
-
 module.exports = router;
